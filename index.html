@@ -61,6 +61,18 @@ header p{color:var(--muted);font-size:.82rem;margin-top:4px}
 .btn-gold{background:var(--gold);color:#1a1a2e}
 .btn-gold:hover{background:#ffe14d;transform:translateY(-1px)}
 
+.import-zone{border:2px dashed var(--border);border-radius:8px;padding:22px 18px;text-align:center;cursor:pointer;background:var(--panel);margin-bottom:14px;transition:border-color .2s,background .2s}
+.import-zone:hover,.import-zone.dragover{border-color:var(--accent);background:rgba(233,69,96,.07)}
+.import-zone input[type=file]{display:none}
+.import-zone .iz-icon{font-size:2rem;margin-bottom:6px}
+.import-zone p{font-size:.82rem;color:var(--muted);margin:0}
+.import-zone p strong{color:var(--text)}
+.import-status{font-size:.78rem;padding:7px 12px;border-radius:4px;margin-bottom:12px;display:none}
+.import-status.ok{background:rgba(120,200,80,.15);border:1px solid rgba(120,200,80,.4);color:#78C850}
+.import-status.err{background:rgba(233,69,96,.15);border:1px solid rgba(233,69,96,.4);color:#e94560}
+.or-divider{display:flex;align-items:center;gap:10px;margin:14px 0;color:var(--muted);font-size:.75rem}
+.or-divider::before,.or-divider::after{content:'';flex:1;height:1px;background:var(--border)}
+
 #preview-empty{text-align:center;color:var(--muted);padding:60px 0}
 #preview-empty .ico{font-size:3rem;margin-bottom:12px}
 .export-row{display:flex;gap:10px;margin-top:14px;flex-wrap:wrap}
@@ -141,6 +153,16 @@ header p{color:var(--muted);font-size:.82rem;margin-top:4px}
   </div>
 
   <div class="sec-title" style="margin-top:22px;margin-bottom:12px;">Pokémon Team</div>
+  <div class="import-zone" id="importZone" onclick="document.getElementById('importFile').click()"
+       ondragover="event.preventDefault();this.classList.add('dragover')"
+       ondragleave="this.classList.remove('dragover')" ondrop="handleDrop(event)">
+    <input type="file" id="importFile" accept=".json" onchange="readFile(this.files[0])">
+    <div class="iz-icon">📂</div>
+    <p><strong>Drop or click to import a Cobblemon NPC trainer JSON</strong></p>
+    <p>Reads the party section automatically</p>
+  </div>
+  <div class="import-status" id="importStatus"></div>
+  <div class="or-divider">or fill manually below</div>
   <div class="slots-list" id="slotsList"></div>
   <div class="btn-row">
     <button class="btn btn-primary" onclick="generate()">⚡ Generate Preview</button>
@@ -194,21 +216,13 @@ header p{color:var(--muted);font-size:.82rem;margin-top:4px}
 <div class="toast" id="toast"></div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 <script>
-function spriteFallback(img) {
-  img.onerror = null;
-  var fb = img.getAttribute('data-stat');
-  if (fb && img.src !== fb) {
-    img.src = fb;
-    img.onerror = function() { this.onerror = null; this.outerHTML = "<div class='sph'>?</div>"; };
-  } else img.outerHTML = "<div class='sph'>?</div>";
-}
-
+var REPO = 'https://raw.githubusercontent.com/SanjiTheLord/cobblesouls-showdown-sprites/master';
 var SPRITES = 'https://play.pokemonshowdown.com/sprites';
 var P = {
-  ani: SPRITES+'/gen5ani', stat: SPRITES+'/gen5',
-  shAni: SPRITES+'/gen5ani-shiny', trainer: SPRITES+'/trainers',
-  types: SPRITES+'/types', cats: SPRITES+'/categories',
-  itemSheet: SPRITES+'/itemicons-sheet.png'
+  ani: REPO+'/sprites/gen5ani', stat: REPO+'/sprites/gen5',
+  shAni: REPO+'/sprites/gen5ani-shiny', trainer: REPO+'/sprites/trainers',
+  types: REPO+'/sprites/types', cats: REPO+'/sprites/categories',
+  itemSheet: REPO+'/sprites/itemicons-sheet.png'
 };
 
 var TYPE_RGB = {
@@ -276,6 +290,90 @@ function previewIcon() {
   img.src = P.trainer+'/'+s+'.png'; img.style.display='block';
   img.onload  = function(){lbl.style.color='#78C850';lbl.textContent='✓ '+s+'.png';};
   img.onerror = function(){img.style.display='none';lbl.style.color='#e94560';lbl.textContent='✗ "'+s+'.png" not found';};
+}
+
+// Parse a single pokemon string from the NPC party format:
+// "spiritomb level=100 held_item=cobblemon:sitrus_berry ability=pressure moves=darkpulse,shadowball,willowisp,suckerpunch"
+function parsePartyMon(str) {
+  var parts = str.trim().split(/\s+/);
+  var species = parts[0].replace(/^[\w-]+:/,''); // strip namespace if present
+  var out = {species:species, level:'', ability:'', item:'', moves:[], shiny:false, nick:''};
+  for (var i=1;i<parts.length;i++) {
+    var kv = parts[i].split('=');
+    if (kv.length < 2) continue;
+    var k=kv[0], v=kv.slice(1).join('=');
+    if (k==='level')      out.level = v;
+    if (k==='ability')    out.ability = v;
+    if (k==='shiny')      out.shiny = v==='true';
+    if (k==='held_item')  out.item = v.replace(/^[\w-]+:/,'').replace(/_/g,' ').replace(/\b./g,function(c){return c.toUpperCase();});
+    if (k==='moves')      out.moves = v.split(',').slice(0,4);
+  }
+  return out;
+}
+
+function setMsg(msg,ok) {
+  var el=document.getElementById('importStatus');
+  el.textContent=msg; el.className='import-status '+(ok?'ok':'err'); el.style.display='block';
+  if(ok) setTimeout(function(){el.style.display='none';},4000);
+}
+
+async function processImport(text) {
+  setMsg('⏳ Reading party…',true);
+  try {
+    var data = JSON.parse(text);
+    var party = data.party && data.party.pokemon;
+    if (!Array.isArray(party)||!party.length) throw new Error('No party.pokemon array found');
+
+    await Promise.all([dex(),moves(),items()]);
+    var pd=_db['pokedex']||{}, mv=_db['moves']||{}, it=_db['items']||{};
+
+    var mons = party.slice(0,6).map(function(str) {
+      var m = parsePartyMon(str);
+      // resolve proper display names from live data
+      var s = slug(m.species,'');
+      m.species = (pd[s]&&pd[s].name) || cap(m.species);
+      // ability: match against pokedex entry
+      if (m.ability && pd[s] && pd[s].abilities) {
+        var an=m.ability.toLowerCase().replace(/[\s-]/g,'');
+        var hit=Object.values(pd[s].abilities).find(function(a){return a.toLowerCase().replace(/[\s-]/g,'')==an;});
+        if(hit) m.ability=hit;
+        else m.ability=cap(m.ability);
+      } else if (m.ability) m.ability=cap(m.ability);
+      // move names from moves db
+      m.moves = m.moves.map(function(mvn){var e=mv[mslug(mvn)];return e&&e.name||cap(mvn);});
+      // item name from items db
+      if (m.item) { var isk=mslug(m.item.replace(/\s/g,'')); if(it[isk]&&it[isk].name)m.item=it[isk].name; }
+      return m;
+    });
+
+    // clear then fill slots
+    for(var i=1;i<=6;i++){['p','nick','lv','gen','ab','it'].forEach(function(f){var el=document.getElementById(f+i);if(el)el.value='';});document.getElementById('s'+i).checked=false;for(var m=1;m<=4;m++)document.getElementById('mv'+i+'_'+m).value='';}
+    mons.forEach(function(mon,idx){
+      var i=idx+1;
+      document.getElementById('p'+i).value=mon.species;
+      document.getElementById('lv'+i).value=mon.level;
+      document.getElementById('ab'+i).value=mon.ability;
+      document.getElementById('it'+i).value=mon.item;
+      document.getElementById('s'+i).checked=mon.shiny;
+      mon.moves.forEach(function(mv,mi){document.getElementById('mv'+i+'_'+(mi+1)).value=mv;});
+    });
+    setMsg('✓ Imported '+mons.length+' Pokémon',true);
+    document.getElementById('slotsList').scrollIntoView({behavior:'smooth',block:'start'});
+  } catch(e) { setMsg('✗ '+e.message,false); }
+}
+
+function readFile(file) {
+  if(!file) return;
+  var r=new FileReader();
+  r.onload=function(e){processImport(e.target.result);};
+  r.readAsText(file);
+  document.getElementById('importFile').value='';
+}
+
+function handleDrop(e) {
+  e.preventDefault();
+  document.getElementById('importZone').classList.remove('dragover');
+  readFile(e.dataTransfer.files[0]);
 }
 
 function buildSlots() {
@@ -370,11 +468,13 @@ async function generate() {
     }).join('');
     var itemHtml='';
     if(mon.item){
-      var icon=mon.itemNum!==null?'<span class="mon-item-icon" style="background:url(\''+P.itemSheet+'\') '+(-((mon.itemNum%16)*24))+'px '+(-(Math.floor(mon.itemNum/16)*24))+'px no-repeat;width:24px;height:24px;image-rendering:pixelated;display:inline-block;flex-shrink:0;" title="'+mon.item+'"></span>':'<span style="font-size:.9rem;flex-shrink:0;">🎒</span>';
+      var icon=mon.itemNum!==null
+        ? '<canvas width="24" height="24" data-spritenum="'+mon.itemNum+'" style="image-rendering:pixelated;display:inline-block;flex-shrink:0;vertical-align:middle;" title="'+mon.item+'"></canvas>'
+        : '<span style="font-size:.9rem;flex-shrink:0;"></span>';
       itemHtml='<div class="mon-meta-label">Held Item</div><div class="mon-item-row">'+icon+'<span class="mon-item-name">'+mon.item+'</span></div>';
     }
     return '<div class="mon-card" style="background:'+cBg+';border-color:'+cBord+';"><div class="mon-top">'+
-      '<div class="mon-sprite-wrap"><img src="'+sd+'/'+mon.s+'.gif" data-stat="'+P.stat+'/'+mon.s+'.png" alt="'+mon.raw+'" onload="this.removeAttribute(\'data-stat\')" onerror="spriteFallback(this)"></div>'+
+      '<div class="mon-sprite-wrap"><img src="'+sd+'/'+mon.s+'.gif" alt="'+mon.raw+'" onerror="this.src=\''+P.stat+'/'+mon.s+'.png\';this.onerror=null;" style="max-width:88px;max-height:88px;image-rendering:pixelated;object-fit:contain;"></div>'+
       '<div class="mon-info"><div class="mon-name-line">'+label+(mon.level?' <span class="mon-level">Lv.'+mon.level+'</span>':'')+(mon.gender?' '+mon.gender:'')+'</div>'+
       '<div class="mon-types-row">'+typeImgs+'</div>'+
       (mon.ability?'<div class="mon-meta-label">Ability</div><div class="mon-meta-val">'+mon.ability+'</div>':'')+
@@ -384,16 +484,70 @@ async function generate() {
 
   document.getElementById('preview-wrap').style.display='block';
   document.getElementById('preview-empty').style.display='none';
+
+  // Draw item icons onto canvases now they're in the DOM
+  var canvases = document.querySelectorAll('canvas[data-spritenum]');
+  if(canvases.length){
+    var sheet = new Image();
+    sheet.crossOrigin = 'anonymous';
+    sheet.onload = function(){
+      canvases.forEach(function(cv){
+        var n = parseInt(cv.getAttribute('data-spritenum'));
+        cv.getContext('2d').drawImage(sheet, -(n%16)*24, -Math.floor(n/16)*24);
+      });
+    };
+    sheet.src = P.itemSheet;
+  }
+
   switchTab('preview');
 }
 
+function imgToDataURL(src) {
+  return new Promise(function(resolve) {
+    var img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = function() {
+      var c = document.createElement('canvas');
+      c.width = img.naturalWidth; c.height = img.naturalHeight;
+      c.getContext('2d').drawImage(img, 0, 0);
+      try { resolve(c.toDataURL()); } catch(e) { resolve(null); }
+    };
+    img.onerror = function() { resolve(null); };
+    img.src = src + (src.indexOf('?') === -1 ? '?' : '&') + '_cb=' + Date.now();
+  });
+}
+
 async function downloadPNG() {
+  showToast('Converting images…');
+  var card = document.getElementById('teamCard');
+  var imgs = Array.from(card.querySelectorAll('img'));
+
+  // Save originals, swap to data URLs
+  var originals = imgs.map(function(img) { return img.src; });
+  await Promise.all(imgs.map(async function(img, i) {
+    var data = await imgToDataURL(img.src);
+    if (data) img.src = data;
+  }));
+
   showToast('Rendering…');
-  try {
-    var c=await html2canvas(document.getElementById('teamCard'),{useCORS:true,scale:2,backgroundColor:null});
-    var a=document.createElement('a'); a.download='team-preview.png'; a.href=c.toDataURL('image/png'); a.click();
+  html2canvas(card, {
+    scale: 2,
+    allowTaint: false,
+    useCORS: false,
+    backgroundColor: null,
+    logging: false
+  }).then(function(canvas) {
+    // Restore original srcs
+    imgs.forEach(function(img, i) { img.src = originals[i]; });
+    var a = document.createElement('a');
+    a.download = 'team-preview.png';
+    a.href = canvas.toDataURL('image/png');
+    a.click();
     showToast('Downloaded!');
-  } catch(e){ showToast('PNG export failed.'); }
+  }).catch(function(e) {
+    imgs.forEach(function(img, i) { img.src = originals[i]; });
+    showToast('Export failed.');
+  });
 }
 
 function switchTab(name) {
